@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# FFmpeg binaries (downloaded during build)
+windows/ffmpeg.exe
+windows/ffprobe.exe
+
+# Inno Setup output
+windows/installer_output/
+
+# macOS
+.DS_Store
+*.icns
+
+# Misc
+*.zip

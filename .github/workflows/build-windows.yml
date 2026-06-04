@@ -1,0 +1,79 @@
+# build-windows.yml
+# GitHub Actions workflow – Build NOCAPTION V4 for Windows
+# Triggers on push to main AND manual dispatch.
+
+name: Build NOCAPTION V4 Windows
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build NOCAPTION V4 (.exe)
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────────
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. Dependencies ─────────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r windows/requirements.txt
+
+      # ── 4. FFmpeg ────────────────────────────────────────────────────────
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $zip = "ffmpeg-release-essentials.zip"
+
+          Write-Host "Downloading FFmpeg ..."
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+
+          Write-Host "Extracting ..."
+          Expand-Archive -Path $zip -DestinationPath "ffmpeg_tmp" -Force
+
+          # Locate the bin directory inside the extracted archive
+          $binDir = Get-ChildItem -Path "ffmpeg_tmp" -Recurse -Directory -Filter "bin" | Select-Object -First 1
+          if (-not $binDir) { throw "Could not find bin/ in FFmpeg archive" }
+
+          Copy-Item "$($binDir.FullName)\ffmpeg.exe"  -Destination "windows\" -Force
+          Copy-Item "$($binDir.FullName)\ffprobe.exe" -Destination "windows\" -Force
+
+          # Cleanup
+          Remove-Item -Recurse -Force "ffmpeg_tmp"
+          Remove-Item -Force $zip
+
+          Write-Host "ffmpeg.exe and ffprobe.exe copied to windows/"
+
+      # ── 5. Build with PyInstaller ────────────────────────────────────────
+      - name: Run PyInstaller
+        run: |
+          pyinstaller windows/NOCAPTION_WIN.spec --noconfirm --distpath windows/dist --workpath windows/build
+
+      # ── 6. Create ZIP archive ────────────────────────────────────────────
+      - name: Create distribution ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "windows\dist\NOCAPTION V4\*" -DestinationPath "NOCAPTION_V4_Windows.zip" -Force
+          Write-Host "Created NOCAPTION_V4_Windows.zip"
+
+      # ── 7. Upload artifact ──────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOCAPTION-V4-Windows
+          path: NOCAPTION_V4_Windows.zip
+          retention-days: 30
