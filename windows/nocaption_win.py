@@ -535,6 +535,57 @@ def process_single_video(data, log_fn=None):
             fc += f"{last_vid}drawtext=fontfile='{font_path}':text='{txt}':fontsize={cfg['t_size']}:fontcolor={cfg['t_color']}:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y={cfg['title_y']}{enable_cmd}[v3];"
             last_vid = "[v3]"
 
+        if cfg.get('branding', {}).get('enable') and cfg['branding'].get('path'):
+            b_cfg = cfg['branding']
+            wm_file = None
+            if b_cfg['mode'] == "Single File" and os.path.isfile(b_cfg['path']):
+                wm_file = b_cfg['path']
+            elif b_cfg['mode'] == "Folder" and os.path.isdir(b_cfg['path']):
+                wm_list = get_files(b_cfg['path'], ('.png', '.jpg', '.jpeg'))
+                if wm_list:
+                    wm_file = os.path.join(b_cfg['path'], random.choice(wm_list))
+            
+            if wm_file:
+                inputs.extend(['-i', wm_file])
+                idx_wm = ctr
+                ctr += 1
+                
+                opac = b_cfg['opacity'] / 100.0
+                wm_scale_factor = round(random.uniform(0.98, 1.02), 3)
+                wm_rot_deg = round(random.uniform(-2, 2), 2)
+                wm_rot_rad = wm_rot_deg * math.pi / 180
+                
+                fc += f"[{idx_wm}:v]format=rgba,colorchannelmixer=aa={opac},scale=iw*{wm_scale_factor}:-1,rotate={wm_rot_rad}:c=none:ow=rotw(a):oh=roth(a)[wm];"
+                
+                pos = b_cfg['pos']
+                if pos == "Random":
+                    pos = random.choice(["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right", "Center"])
+                
+                pad_x = random.randint(15, 30)
+                pad_y = random.randint(15, 30)
+                
+                if pos == "Top-Left":
+                    ox, oy = f"{pad_x}", f"{pad_y}"
+                elif pos == "Top-Right":
+                    ox, oy = f"W-w-{pad_x}", f"{pad_y}"
+                elif pos == "Bottom-Left":
+                    ox, oy = f"{pad_x}", f"H-h-{pad_y}"
+                elif pos == "Bottom-Right":
+                    ox, oy = f"W-w-{pad_x}", f"H-h-{pad_y}"
+                elif pos == "Center":
+                    ox, oy = f"(W-w)/2", f"(H-h)/2"
+                else:
+                    ox, oy = f"{pad_x}", f"{pad_y}"
+                    
+                enable_cmd = ""
+                if b_cfg['dur'] == "Random Pop-up":
+                    cycle = random.randint(7, 12)
+                    show = round(random.uniform(2.5, 4.5), 2)
+                    enable_cmd = f":enable='lt(mod(t\\,{cycle})\\,{show})'"
+                
+                fc += f"{last_vid}[wm]overlay=x='{ox}':y='{oy}'{enable_cmd}[v_wm];"
+                last_vid = "[v_wm]"
+
         vo_added_at_index = None
         if cfg['enable_vo'] and p_vo:
             inputs.extend(['-i', p_vo])
@@ -736,18 +787,21 @@ class App(tk.Tk):
         self.tab_assets = ttk.Frame(nb)
         self.tab_control = ttk.Frame(nb)
         self.tab_evasion = ttk.Frame(nb)
+        self.tab_branding = ttk.Frame(nb)
         self.tab_meta = ttk.Frame(nb)
         self.tab_actions = ttk.Frame(nb)
 
         nb.add(self.tab_assets, text="Assets")
         nb.add(self.tab_control, text="Control")
         nb.add(self.tab_evasion, text="Advanced Evasion")
+        nb.add(self.tab_branding, text="Branding")
         nb.add(self.tab_meta, text="Metadata")
         nb.add(self.tab_actions, text="Actions")
 
         self._build_assets_tab()
         self._build_control_tab()
         self._build_evasion_tab()
+        self._build_branding_tab()
         self._build_meta_tab()
         self._build_actions_tab()
 
@@ -1057,6 +1111,60 @@ class App(tk.Tk):
         author_frame.pack(fill=tk.X, padx=10, pady=6)
         self.meta_author = tk.StringVar(value="Content Creator")
         ttk.Entry(author_frame, textvariable=self.meta_author, width=40).pack(side=tk.LEFT, padx=6)
+
+    def _build_branding_tab(self):
+        frm = self.tab_branding
+        
+        main_frame = ttk.LabelFrame(frm, text="Watermark & Logo Overlay")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.wm_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(main_frame, text="Enable Branding / Watermark", variable=self.wm_enable).pack(anchor=tk.W, padx=10, pady=10)
+        
+        # Source mode
+        mode_frame = ttk.Frame(main_frame)
+        mode_frame.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(mode_frame, text="Source Mode:").pack(side=tk.LEFT)
+        self.wm_mode = tk.StringVar(value="Single File")
+        ttk.Radiobutton(mode_frame, text="Single File", variable=self.wm_mode, value="Single File").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(mode_frame, text="Folder (Random Product)", variable=self.wm_mode, value="Folder").pack(side=tk.LEFT)
+        
+        self.wm_path = tk.StringVar()
+        
+        def _browse_wm():
+            if self.wm_mode.get() == "Single File":
+                p = filedialog.askopenfilename(title="Select Logo", filetypes=[("Image Files", "*.png *.jpg *.jpeg")])
+            else:
+                p = filedialog.askdirectory(title="Select Folder of Logos")
+            if p:
+                self.wm_path.set(p)
+
+        path_row = ttk.Frame(main_frame)
+        path_row.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(path_row, text="Path:", width=15).pack(side=tk.LEFT)
+        ttk.Entry(path_row, textvariable=self.wm_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(path_row, text="Browse", command=_browse_wm).pack(side=tk.LEFT)
+
+        # Settings
+        set_frame = ttk.Frame(main_frame)
+        set_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Position
+        ttk.Label(set_frame, text="Position:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.wm_pos = tk.StringVar(value="Top-Left")
+        cb = ttk.Combobox(set_frame, textvariable=self.wm_pos, values=["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right", "Center", "Random"], state="readonly", width=15)
+        cb.grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
+
+        # Opacity
+        ttk.Label(set_frame, text="Opacity (%):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.wm_opacity = tk.IntVar(value=80)
+        ttk.Scale(set_frame, from_=10, to=100, variable=self.wm_opacity, orient=tk.HORIZONTAL, length=150).grid(row=1, column=1, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(set_frame, textvariable=self.wm_opacity).grid(row=1, column=2, sticky=tk.W)
+
+        # Duration
+        ttk.Label(set_frame, text="Duration:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.wm_dur = tk.StringVar(value="Full Video")
+        ttk.Combobox(set_frame, textvariable=self.wm_dur, values=["Full Video", "Random Pop-up"], state="readonly", width=15).grid(row=2, column=1, padx=10, pady=5, sticky=tk.W)
 
     def _build_actions_tab(self):
         frm = self.tab_actions
@@ -1387,6 +1495,14 @@ class App(tk.Tk):
                 'pad': self.ev_pad.get(),
                 'flash': self.ev_flash.get(),
             },
+            'branding': {
+                'enable': self.wm_enable.get(),
+                'mode': self.wm_mode.get(),
+                'path': self.wm_path.get(),
+                'pos': self.wm_pos.get(),
+                'opacity': int(self.wm_opacity.get()),
+                'dur': self.wm_dur.get()
+            }
         }
         return cfg
 
@@ -1496,7 +1612,13 @@ class App(tk.Tk):
             'ev_blur': cfg['evasion']['blur'],
             'ev_luma': cfg['evasion']['luma'],
             'ev_pad': cfg['evasion']['pad'],
-            'ev_flash': cfg['evasion']['flash']
+            'ev_flash': cfg['evasion']['flash'],
+            'wm_enable': cfg['branding']['enable'],
+            'wm_mode': cfg['branding']['mode'],
+            'wm_path': cfg['branding']['path'],
+            'wm_pos': cfg['branding']['pos'],
+            'wm_opacity': cfg['branding']['opacity'],
+            'wm_dur': cfg['branding']['dur']
         })
 
         ffmpeg_path = find_ffmpeg()
@@ -1673,6 +1795,12 @@ class App(tk.Tk):
         self.ev_luma.set(cfg.get('ev_luma', True))
         self.ev_pad.set(cfg.get('ev_pad', False))
         self.ev_flash.set(cfg.get('ev_flash', True))
+        self.wm_enable.set(cfg.get('wm_enable', False))
+        self.wm_mode.set(cfg.get('wm_mode', "Single File"))
+        self.wm_path.set(cfg.get('wm_path', ''))
+        self.wm_pos.set(cfg.get('wm_pos', 'Top-Left'))
+        self.wm_opacity.set(cfg.get('wm_opacity', 80))
+        self.wm_dur.set(cfg.get('wm_dur', 'Full Video'))
         self._toggle_struct_outro()
         self._toggle_problem_count()
 
