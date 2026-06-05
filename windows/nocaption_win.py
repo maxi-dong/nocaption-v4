@@ -480,8 +480,8 @@ def process_single_video(data, log_fn=None):
 
         if do_pad:
             shrink = round(random.uniform(0.94, 0.98), 2)
-            pad_x = f"(ow-iw)*{round(random.uniform(0.2, 0.8), 2)}"
-            pad_y = f"(oh-ih)*{round(random.uniform(0.2, 0.8), 2)}"
+            pad_x = f"(W-w)*{round(random.uniform(0.2, 0.8), 2)}"
+            pad_y = f"(H-h)*{round(random.uniform(0.2, 0.8), 2)}"
             fc += f"{last_vid}split[vp_vid][vp_bg];[vp_bg]scale={W}:{H},boxblur=20[vp_bgb];[vp_vid]scale=iw*{shrink}:ih*{shrink}[vp_fg];[vp_bgb][vp_fg]overlay=x='{pad_x}':y='{pad_y}'[v_pad];"
             last_vid = "[v_pad]"
 
