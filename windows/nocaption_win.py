@@ -426,7 +426,12 @@ def process_single_video(data, log_fn=None):
                 final_dur = 5.0
 
             speed_mod = 1.0
-            if cfg['fx']['speed']:
+            ev_rand = cfg.get('evasion', {}).get('randomizer', False)
+            do_time = cfg.get('evasion', {}).get('time') if not ev_rand else random.choice([True, False])
+            
+            if do_time:
+                speed_mod = round(random.uniform(0.92, 1.08), 3)
+            elif cfg['fx']['speed']:
                 var = cfg['fx']['speed_val'] / 100.0
                 speed_mod = round(random.uniform(1.0 - var, 1.0 + var), 2)
 
@@ -457,6 +462,53 @@ def process_single_video(data, log_fn=None):
 
         fc += f"{concat_inputs}concat=n={n_clips_actual}:v=1:a=1:unsafe=1[base_vid][base_aud];"
         last_vid = "[base_vid]"
+
+        ev = cfg.get('evasion', {})
+        rand_ev = ev.get('randomizer', False)
+        do_shake = ev.get('shake') if not rand_ev else random.choice([True, False])
+        do_lens = ev.get('lens') if not rand_ev else random.choice([True, False])
+        do_blur = ev.get('blur') if not rand_ev else random.choice([True, False, False])
+        do_luma = ev.get('luma') if not rand_ev else random.choice([True, False])
+        do_pad = ev.get('pad') if not rand_ev else random.choice([True, False, False])
+        do_flash = ev.get('flash') if not rand_ev else random.choice([True, False])
+
+        if do_shake:
+            sx = f"(iw-ow)/2+{random.randint(2,8)}*sin(t*{round(random.uniform(0.5, 2.0), 2)})"
+            sy = f"(ih-oh)/2+{random.randint(2,8)}*cos(t*{round(random.uniform(0.5, 2.0), 2)})"
+            fc += f"{last_vid}crop=iw*0.96:ih*0.96:{sx}:{sy},scale={W}:{H}[v_shake];"
+            last_vid = "[v_shake]"
+
+        if do_pad:
+            shrink = round(random.uniform(0.94, 0.98), 2)
+            pad_x = f"(ow-iw)*{round(random.uniform(0.2, 0.8), 2)}"
+            pad_y = f"(oh-ih)*{round(random.uniform(0.2, 0.8), 2)}"
+            fc += f"{last_vid}split[vp_vid][vp_bg];[vp_bg]scale={W}:{H},boxblur=20[vp_bgb];[vp_vid]scale=iw*{shrink}:ih*{shrink}[vp_fg];[vp_bgb][vp_fg]overlay=x='{pad_x}':y='{pad_y}'[v_pad];"
+            last_vid = "[v_pad]"
+
+        if do_luma:
+            rs = round(random.uniform(-0.05, 0.05), 3)
+            bs = round(random.uniform(-0.05, 0.05), 3)
+            rh = round(random.uniform(-0.05, 0.05), 3)
+            bh = round(random.uniform(-0.05, 0.05), 3)
+            fc += f"{last_vid}colorbalance=rs={rs}:bs={bs}:rh={rh}:bh={bh}[v_luma];"
+            last_vid = "[v_luma]"
+
+        if do_lens:
+            k1 = round(random.uniform(-0.02, 0.02), 3)
+            cbh = random.choice([-2, -1, 1, 2])
+            crh = random.choice([-2, -1, 1, 2])
+            fc += f"{last_vid}lenscorrection=cx=0.5:cy=0.5:k1={k1}:k2={-k1},chromashift=cbh={cbh}:crh={crh}[v_lens];"
+            last_vid = "[v_lens]"
+
+        if do_blur:
+            fc += f"{last_vid}tblend=all_mode=average:all_opacity=0.3[v_tblend];"
+            last_vid = "[v_tblend]"
+
+        if do_flash:
+            interval = random.randint(3, 6)
+            opacity = round(random.uniform(0.2, 0.5), 2)
+            fc += f"{last_vid}drawbox=x=0:y=0:w=iw:h=ih:color=white@{opacity}:t=fill:enable='lt(mod(t\\,{interval})\\,0.05)'[v_flash];"
+            last_vid = "[v_flash]"
 
         if cfg['fx']['zoom']:
             z = cfg['fx']['zoom_val']
@@ -683,16 +735,19 @@ class App(tk.Tk):
 
         self.tab_assets = ttk.Frame(nb)
         self.tab_control = ttk.Frame(nb)
+        self.tab_evasion = ttk.Frame(nb)
         self.tab_meta = ttk.Frame(nb)
         self.tab_actions = ttk.Frame(nb)
 
         nb.add(self.tab_assets, text="Assets")
         nb.add(self.tab_control, text="Control")
+        nb.add(self.tab_evasion, text="Advanced Evasion")
         nb.add(self.tab_meta, text="Metadata")
         nb.add(self.tab_actions, text="Actions")
 
         self._build_assets_tab()
         self._build_control_tab()
+        self._build_evasion_tab()
         self._build_meta_tab()
         self._build_actions_tab()
 
@@ -936,6 +991,33 @@ class App(tk.Tk):
         self.limit_qty = tk.IntVar(value=5)
         ttk.Label(prod_frame, text="Total Videos to Generate").pack(side=tk.LEFT, padx=6)
         ttk.Spinbox(prod_frame, from_=1, to=5000, textvariable=self.limit_qty, width=8).pack(side=tk.LEFT)
+
+    def _build_evasion_tab(self):
+        frm = self.tab_evasion
+        
+        top = ttk.Frame(frm)
+        top.pack(fill=tk.X, padx=10, pady=10)
+        self.evade_randomizer = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Global Randomizer (Auto-pick random features & values per video)", variable=self.evade_randomizer).pack(side=tk.LEFT, padx=6)
+        
+        list_frm = ttk.LabelFrame(frm, text="Evasion Features (Anti-Detect)")
+        list_frm.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+        
+        self.ev_time = tk.BooleanVar(value=True)
+        self.ev_shake = tk.BooleanVar(value=True)
+        self.ev_lens = tk.BooleanVar(value=True)
+        self.ev_blur = tk.BooleanVar(value=False)
+        self.ev_luma = tk.BooleanVar(value=True)
+        self.ev_pad = tk.BooleanVar(value=False)
+        self.ev_flash = tk.BooleanVar(value=True)
+        
+        ttk.Checkbutton(list_frm, text="1. Dynamic Time Remapping (Micro-Pacing)", variable=self.ev_time).pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Checkbutton(list_frm, text="2. Artificial Camera Shake (Perlin/Sine Drift)", variable=self.ev_shake).pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Checkbutton(list_frm, text="3. Micro Chromatic Aberration & Lens Distortion", variable=self.ev_lens).pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Checkbutton(list_frm, text="4. Frame Blending / Motion Blur Buatan (Slower Render)", variable=self.ev_blur).pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Checkbutton(list_frm, text="5. Smart Luma / Shadow-Highlight Shifting", variable=self.ev_luma).pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Checkbutton(list_frm, text="6. Edge Padding dengan Dynamic Blur (Slower Render)", variable=self.ev_pad).pack(anchor=tk.W, padx=10, pady=4)
+        ttk.Checkbutton(list_frm, text="7. Subliminal Flash Frames / Micro-Cuts", variable=self.ev_flash).pack(anchor=tk.W, padx=10, pady=4)
 
     def _build_meta_tab(self):
         frm = self.tab_meta
@@ -1295,6 +1377,16 @@ class App(tk.Tk):
             'meta': meta_config,
             'preview_mode': preview_mode,
             'strict_name_mode': (not mode_random),
+            'evasion': {
+                'randomizer': self.evade_randomizer.get(),
+                'time': self.ev_time.get(),
+                'shake': self.ev_shake.get(),
+                'lens': self.ev_lens.get(),
+                'blur': self.ev_blur.get(),
+                'luma': self.ev_luma.get(),
+                'pad': self.ev_pad.get(),
+                'flash': self.ev_flash.get(),
+            },
         }
         return cfg
 
@@ -1396,7 +1488,15 @@ class App(tk.Tk):
             'min_problem_clip': cfg['min_problem_clip'],
             'max_problem_clip': cfg['max_problem_clip'],
             'file_intro': cfg['file_intro'],
-            'file_outro': cfg['file_outro']
+            'file_outro': cfg['file_outro'],
+            'evade_randomizer': cfg['evasion']['randomizer'],
+            'ev_time': cfg['evasion']['time'],
+            'ev_shake': cfg['evasion']['shake'],
+            'ev_lens': cfg['evasion']['lens'],
+            'ev_blur': cfg['evasion']['blur'],
+            'ev_luma': cfg['evasion']['luma'],
+            'ev_pad': cfg['evasion']['pad'],
+            'ev_flash': cfg['evasion']['flash']
         })
 
         ffmpeg_path = find_ffmpeg()
@@ -1565,6 +1665,14 @@ class App(tk.Tk):
         self.max_problem_clip.set(cfg.get('max_problem_clip', 6))
         self.file_intro.set(cfg.get('file_intro', ''))
         self.file_outro.set(cfg.get('file_outro', ''))
+        self.evade_randomizer.set(cfg.get('evade_randomizer', True))
+        self.ev_time.set(cfg.get('ev_time', True))
+        self.ev_shake.set(cfg.get('ev_shake', True))
+        self.ev_lens.set(cfg.get('ev_lens', True))
+        self.ev_blur.set(cfg.get('ev_blur', False))
+        self.ev_luma.set(cfg.get('ev_luma', True))
+        self.ev_pad.set(cfg.get('ev_pad', False))
+        self.ev_flash.set(cfg.get('ev_flash', True))
         self._toggle_struct_outro()
         self._toggle_problem_count()
 
