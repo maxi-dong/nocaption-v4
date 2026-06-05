@@ -1,0 +1,51 @@
+name: Build NOCAPTION V4 macOS
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller Pillow
+
+    - name: Download FFmpeg (macOS static build)
+      run: |
+        mkdir -p macos/ffmpeg_temp
+        cd macos/ffmpeg_temp
+        # Using evermeet.cx which provides static ffmpeg builds for macOS
+        curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/zip
+        unzip ffmpeg.zip
+        cp ffmpeg ../ffmpeg
+        cd ..
+        rm -rf ffmpeg_temp
+        chmod +x ffmpeg
+
+    - name: Build with PyInstaller
+      working-directory: macos
+      run: |
+        pyinstaller NOCAPTION_MAC.spec --distpath dist --workpath build --clean -y
+
+    - name: Zip the Application Bundle
+      working-directory: macos/dist
+      run: |
+        zip -r "NOCAPTION V4 Mac App.zip" "NOCAPTION V4.app"
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: NOCAPTION V4 Mac App
+        path: macos/dist/NOCAPTION V4 Mac App.zip
