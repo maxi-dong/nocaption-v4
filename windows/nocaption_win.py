@@ -1,6 +1,7 @@
 import os
 import math
 import sys
+import platform
 import json
 import random
 import re
@@ -10,7 +11,6 @@ import threading
 import queue
 import subprocess
 import concurrent.futures
-import platform
 from pathlib import Path
 
 import tkinter as tk
@@ -72,7 +72,7 @@ EDITOR_POOL = [
 # ==========================================
 APP_DATA_DIR = Path.home() / "Documents" / "NOCAPTION_V4"
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-CONFIG_FILE = APP_DATA_DIR / "v4_config.json"
+CONFIG_FILE = APP_DATA_DIR / "v9_config.json"
 
 
 def load_config():
@@ -97,16 +97,11 @@ def save_config(config_data):
 # 🧠 HELPER FUNCTIONS
 # ==========================================
 
-# Windows: hide subprocess console windows
-_SUBPROCESS_FLAGS = {}
-if sys.platform == "win32":
-    _SUBPROCESS_FLAGS["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-
 def get_duration(ffmpeg_exe, file_path):
     try:
         cmd = [ffmpeg_exe, '-i', file_path, '-hide_banner']
-        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True, **_SUBPROCESS_FLAGS)
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == "win32" else 0
+        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True, creationflags=flags)
         match = re.search(r"Duration: (\d{2}):(\d{2}):(\d{2}\.\d+)", result.stderr)
         if match:
             h, m, s = map(float, match.groups())
@@ -119,7 +114,8 @@ def get_duration(ffmpeg_exe, file_path):
 def has_audio_stream(ffmpeg_exe, file_path):
     try:
         cmd = [ffmpeg_exe, '-i', file_path, '-hide_banner']
-        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True, **_SUBPROCESS_FLAGS)
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == "win32" else 0
+        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True, creationflags=flags)
         return "Audio:" in result.stderr
     except Exception:
         return False
@@ -128,7 +124,8 @@ def has_audio_stream(ffmpeg_exe, file_path):
 def check_media_integrity(ffmpeg_path, file_path):
     try:
         cmd = [ffmpeg_path, '-v', 'error', '-i', file_path, '-f', 'null', '-']
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_SUBPROCESS_FLAGS)
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == "win32" else 0
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
         return True
     except Exception:
         return False
@@ -161,108 +158,139 @@ def generate_smart_blueprints(hooks, probs, sols, ctas, limit):
             attempts += 1
     return blueprints, max_possible
 
-def generate_structured_blueprints(hooks, probs, sols, ctas, outros, limit):
+def clip_token(filename):
+    return os.path.splitext(os.path.basename(filename))[0].strip().lower()
+
+
+def structured_combo_signature(combo):
+    hook_file = combo[0]
+    problem_files = combo[1] if isinstance(combo[1], (tuple, list)) else (combo[1],)
+    sol_file = combo[2]
+    cta_file = combo[3]
+    outro_file = combo[4] if len(combo) >= 5 else None
+
+    parts = [clip_token(hook_file)]
+    parts.extend(clip_token(p) for p in problem_files)
+    parts.append(clip_token(sol_file))
+    parts.append(clip_token(cta_file))
+    if outro_file:
+        parts.append(clip_token(outro_file))
+    return "".join(parts)
+
+
+def generate_structured_blueprints(
+    hooks,
+    probs,
+    sols,
+    ctas,
+    outros,
+    limit,
+    random_problem_count=False,
+    min_problem=1,
+    max_problem=1,
+    excluded_signatures=None,
+):
     blueprints = []
-    seen_combinations = set()
-    max_possible = len(hooks) * len(probs) * len(sols) * len(ctas) * len(outros)
+    seen_signatures = set()
+    excluded = set(excluded_signatures or [])
+    signatures = []
+    n_prob = len(probs)
+
+    if n_prob == 0:
+        return [], 0, []
+
+    if random_problem_count:
+        min_k = max(1, int(min_problem))
+        max_k = min(int(max_problem), 6, n_prob)
+        if min_k > max_k:
+            return [], 0, []
+        problem_variants = sum(perm_count(n_prob, k) for k in range(min_k, max_k + 1))
+    else:
+        min_k = max_k = 1
+        problem_variants = n_prob
+
+    max_possible = len(hooks) * len(sols) * len(ctas) * problem_variants
+    if outros:
+        max_possible *= len(outros)
     target = min(limit, max_possible)
     attempts = 0
     max_attempts = limit * 50
 
     while len(blueprints) < target and attempts < max_attempts:
+        k = random.randint(min_k, max_k)
+        prob_seq = tuple(random.sample(probs, k))
+
         combo = (
             random.choice(hooks),
-            random.choice(probs),
+            prob_seq,
             random.choice(sols),
             random.choice(ctas),
-            random.choice(outros),
         )
-        if combo not in seen_combinations:
-            seen_combinations.add(combo)
+        if outros:
+            combo = combo + (random.choice(outros),)
+
+        sig = structured_combo_signature(combo)
+        if sig not in seen_signatures and sig not in excluded:
+            seen_signatures.add(sig)
             blueprints.append(combo)
+            signatures.append(sig)
             attempts = 0
         else:
             attempts += 1
-    return blueprints, max_possible
-
-
-def _get_app_base_dir():
-    """Get the base directory of the application (works for both frozen and dev)."""
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    return blueprints, max_possible, signatures
 
 
 def find_ffmpeg():
-    """Find ffmpeg executable - Windows & cross-platform compatible."""
+    candidates = []
 
-    # 1. Check bundled with PyInstaller (_MEIPASS for onefile, exe dir for onedir)
-    if getattr(sys, 'frozen', False):
-        # One-dir mode: ffmpeg next to the exe
-        exe_dir = os.path.dirname(sys.executable)
-        bundled = os.path.join(exe_dir, 'ffmpeg.exe')
-        if os.path.exists(bundled):
-            return bundled
-        # One-file mode: inside temp _MEIPASS
-        meipass = getattr(sys, '_MEIPASS', None)
-        if meipass:
-            bundled2 = os.path.join(meipass, 'ffmpeg.exe')
-            if os.path.exists(bundled2):
-                return bundled2
+    env = os.environ.get("FFMPEG_PATH")
+    if env:
+        candidates.append(Path(env))
 
-    # 2. Check PATH
-    which_result = shutil.which("ffmpeg")
-    if which_result:
-        return which_result
+    # PyInstaller locations (onedir bundle)
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "ffmpeg")
+        candidates.append(exe_dir / "bin" / "ffmpeg")
 
-    # 3. Common install locations (Windows)
-    if sys.platform == "win32":
-        possible_win = [
-            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'ffmpeg', 'bin', 'ffmpeg.exe'),
-            os.path.join(os.environ.get('PROGRAMFILES', ''), 'ffmpeg', 'bin', 'ffmpeg.exe'),
-            os.path.join(os.environ.get('PROGRAMFILES(X86)', ''), 'ffmpeg', 'bin', 'ffmpeg.exe'),
-            r'C:\ffmpeg\bin\ffmpeg.exe',
-            r'C:\tools\ffmpeg\bin\ffmpeg.exe',
-            r'C:\ffmpeg\ffmpeg.exe',
-        ]
-        for p in possible_win:
-            if p and os.path.exists(p):
-                return p
+        # macOS .app layout: Contents/MacOS/<exe>, Resources is sibling of MacOS
+        contents_dir = exe_dir.parent
+        resources_dir = contents_dir / "Resources"
+        candidates.append(resources_dir / "ffmpeg")
+        candidates.append(resources_dir / "bin" / "ffmpeg")
+    except Exception:
+        pass
 
-    # 4. Common install locations (macOS - fallback)
-    if sys.platform == "darwin":
-        possible_mac = [
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-        ]
-        for p in possible_mac:
-            if os.path.exists(p) and os.access(p, os.X_OK):
-                return p
+    # PyInstaller temp extraction (onefile)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = Path(meipass)
+        candidates.append(base / "ffmpeg")
+        candidates.append(base / "bin" / "ffmpeg")
 
+    # System fallback
+    which = shutil.which("ffmpeg")
+    if which:
+        candidates.append(Path(which))
+    candidates.extend([
+        Path("/opt/homebrew/bin/ffmpeg"),
+        Path("/usr/local/bin/ffmpeg"),
+        Path("/Users/maxidong/Documents/ffmpeg"),
+        Path("ffmpeg"),
+        Path("ffmpeg.exe"),
+        Path("C:/ffmpeg/bin/ffmpeg.exe"),
+        Path("C:/Program Files/ffmpeg/bin/ffmpeg.exe")
+    ])
+
+    for p in candidates:
+        try:
+            if p and p.exists() and os.access(str(p), os.X_OK):
+                return str(p)
+            elif p and p.with_suffix('.exe').exists():
+                return str(p.with_suffix('.exe'))
+        except Exception:
+            continue
     return None
-
-
-def get_system_font():
-    """Get a system font path compatible with FFmpeg's drawtext filter."""
-    if sys.platform == "win32":
-        # FFmpeg on Windows needs forward slashes and escaped colon
-        win_font = r'C:\Windows\Fonts\arial.ttf'
-        if os.path.exists(win_font):
-            return "C\\:/Windows/Fonts/arial.ttf"
-        win_font2 = r'C:\Windows\Fonts\segoeui.ttf'
-        if os.path.exists(win_font2):
-            return "C\\:/Windows/Fonts/segoeui.ttf"
-        return "Arial"
-    elif sys.platform == "darwin":
-        if os.path.exists("/System/Library/Fonts/Helvetica.ttc"):
-            return "/System/Library/Fonts/Helvetica.ttc"
-        return "Arial"
-    else:
-        # Linux
-        if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
-            return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        return "Arial"
-
 
 def perm_count(n, k):
     if k < 0 or n < 0:
@@ -273,12 +301,20 @@ def perm_count(n, k):
 
 
 def process_single_video(data, log_fn=None):
-    i, vo_file, limit_qty, cfg, dict_videos, list_vid, list_mus, ffmpeg_path, fixed_combo = data
+    i, vo_file, limit_qty, cfg, dict_videos, list_vid, list_mus, ffmpeg_path, fixed_combo, output_stem = data
     p_out = ""
 
     try:
-        filename_suffix = vo_file if vo_file else f"Video_{i + 1}"
-        p_out = os.path.join(cfg['path_out'], f"Gen_{i + 1}_{filename_suffix}.mp4")
+        if output_stem:
+            filename_suffix = output_stem
+            p_out = os.path.join(cfg['path_out'], f"{output_stem}.mp4")
+            if cfg.get('strict_name_mode') and os.path.exists(p_out):
+                if log_fn:
+                    log_fn(f"⚠️ SKIP Video {i}: signature already exists {output_stem}.mp4")
+                return True
+        else:
+            filename_suffix = vo_file if vo_file else f"Video_{i + 1}"
+            p_out = os.path.join(cfg['path_out'], f"Gen_{i + 1}_{filename_suffix}.mp4")
 
         # --- 1. VALIDASI VO ---
         p_vo, vo_duration_check = None, 0
@@ -338,14 +374,27 @@ def process_single_video(data, log_fn=None):
                 full_path_combo = [os.path.join(cfg['path_vid'], v) for v in raw_selection]
         else:
             if fixed_combo:
-                full_path_combo = [
-                    os.path.join(cfg['path_hook'], fixed_combo[0]),
-                    os.path.join(cfg['path_prob'], fixed_combo[1]),
-                    os.path.join(cfg['path_sol'], fixed_combo[2]),
-                    os.path.join(cfg['path_cta'], fixed_combo[3])
-                ]
-                if len(fixed_combo) >= 5:
-                    full_path_combo.append(os.path.join(cfg['path_struct_outro'], fixed_combo[4]))
+                hook_file = fixed_combo[0]
+                problem_part = fixed_combo[1]
+
+                if isinstance(problem_part, (tuple, list)):
+                    problem_files = list(problem_part)
+                    sol_file = fixed_combo[2]
+                    cta_file = fixed_combo[3]
+                    outro_file = fixed_combo[4] if len(fixed_combo) >= 5 else None
+                else:
+                    # Backward compatible shape: (hook, problem, solution, cta[, outro])
+                    problem_files = [problem_part]
+                    sol_file = fixed_combo[2]
+                    cta_file = fixed_combo[3]
+                    outro_file = fixed_combo[4] if len(fixed_combo) >= 5 else None
+
+                full_path_combo = [os.path.join(cfg['path_hook'], hook_file)]
+                full_path_combo.extend(os.path.join(cfg['path_prob'], p) for p in problem_files)
+                full_path_combo.append(os.path.join(cfg['path_sol'], sol_file))
+                full_path_combo.append(os.path.join(cfg['path_cta'], cta_file))
+                if outro_file:
+                    full_path_combo.append(os.path.join(cfg['path_struct_outro'], outro_file))
             else:
                 return False
 
@@ -368,6 +417,7 @@ def process_single_video(data, log_fn=None):
 
         concat_inputs = ""
         n_clips_actual = len(full_path_combo)
+        any_ori_audio_in_base = False
 
         for k in range(n_clips_actual):
             current_file_dur = get_duration(ffmpeg_path, full_path_combo[k])
@@ -391,11 +441,13 @@ def process_single_video(data, log_fn=None):
                 has_ori_audio = has_audio_stream(ffmpeg_path, full_path_combo[k])
 
             if has_ori_audio:
+                any_ori_audio_in_base = True
                 speed_safe = max(0.5, min(2.0, speed_mod))
                 f_audio = f"[{k}:a]"
                 if target_clip_t:
                     f_audio += f"atrim=duration={final_dur},"
-                f_audio += f"atempo={speed_safe},volume=0.3,aformat=channel_layouts=stereo,aresample=44100[a{k}];"
+                # Keep original clip loudness (no fixed attenuation).
+                f_audio += f"atempo={speed_safe},aformat=channel_layouts=stereo,aresample=44100[a{k}];"
                 fc += f_audio
             else:
                 dur_cmd = f"duration={final_dur}"
@@ -424,7 +476,10 @@ def process_single_video(data, log_fn=None):
             enable_cmd = ""
             if not cfg['title_full_dur']:
                 enable_cmd = f":enable='between(t,0,{cfg['title_dur_sec']})'"
-            font_path = get_system_font()
+            if sys.platform == "win32":
+                font_path = "C\\\\:/Windows/Fonts/arial.ttf"
+            else:
+                font_path = "/System/Library/Fonts/Helvetica.ttc" if os.path.exists("/System/Library/Fonts/Helvetica.ttc") else "Arial"
             fc += f"{last_vid}drawtext=fontfile='{font_path}':text='{txt}':fontsize={cfg['t_size']}:fontcolor={cfg['t_color']}:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y={cfg['title_y']}{enable_cmd}[v3];"
             last_vid = "[v3]"
 
@@ -464,7 +519,10 @@ def process_single_video(data, log_fn=None):
             if d_in:
                 intro_ms = int(d_in * 1000)
 
-        audio_mix_inputs = ["[base_aud]"]
+        audio_mix_inputs = []
+        # Only include base audio if it actually contains source clip audio.
+        if cfg['keep_ori_audio'] and any_ori_audio_in_base:
+            audio_mix_inputs.append("[base_aud]")
 
         if vo_added_at_index is not None:
             idx_vo = vo_added_at_index
@@ -477,7 +535,8 @@ def process_single_video(data, log_fn=None):
             idx_mus = ctr
             ctr += 1
             dly = f"adelay={intro_ms}|{intro_ms}" if intro_ms > 0 else "anull"
-            fc += f"[{idx_mus}:a]{dly},volume=0.2,aresample=44100,aformat=channel_layouts=stereo[amus];"
+            # Keep music source loudness unchanged.
+            fc += f"[{idx_mus}:a]{dly},aresample=44100,aformat=channel_layouts=stereo[amus];"
             audio_mix_inputs.append("[amus]")
 
         n_mix = len(audio_mix_inputs)
@@ -485,9 +544,18 @@ def process_single_video(data, log_fn=None):
 
         if cfg['use_ducking'] and "[avo]" in audio_mix_inputs and "[amus]" in audio_mix_inputs:
             fc += f"[amus][avo]sidechaincompress=threshold=0.05:ratio=10:attack=5:release=300[mduck];"
-            fc += f"[base_aud][mduck][avo]amix=inputs=3:duration=shortest[afin]"
+            if "[base_aud]" in audio_mix_inputs:
+                fc += f"[base_aud][mduck][avo]amix=inputs=3:duration=shortest[afin]"
+            else:
+                fc += f"[mduck][avo]amix=inputs=2:duration=shortest[afin]"
         else:
-            fc += f"{mix_str}amix=inputs={n_mix}:duration=shortest[afin]"
+            if n_mix == 0:
+                # Fallback: preserve silent track when nothing else is present.
+                fc += f"[base_aud]anull[afin]"
+            elif n_mix == 1:
+                fc += f"{audio_mix_inputs[0]}anull[afin]"
+            else:
+                fc += f"{mix_str}amix=inputs={n_mix}:duration=shortest[afin]"
 
         days_back = random.randint(1, 30)
         seconds_back = random.randint(0, 86400)
@@ -540,37 +608,37 @@ def process_single_video(data, log_fn=None):
         else:
             metadata_flags.extend(['-metadata', 'encoder=iPhone Upload'])
 
-        bitrate_val = "5000k"
-        if "3M" in cfg.get('bitrate_mode', ''):
-            bitrate_val = "3000k"
-        elif "8M" in cfg.get('bitrate_mode', ''):
-            bitrate_val = "8000k"
+        bitrate_map = {
+            "1.5M (Very Light)": "1500k",
+            "2M (Ultra Light)": "2000k",
+            "3M (Light)": "3000k",
+            "5M (Standard)": "5000k",
+            "8M (High)": "8000k",
+        }
+        bitrate_val = bitrate_map.get(cfg.get('bitrate_mode', ''), "5000k")
 
         accel_mode = cfg.get('hw_accel', 'CPU')
         encoding_flags = []
 
-        if "NVIDIA" in accel_mode:
-            encoding_flags = ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '24', '-b:v', bitrate_val]
-        elif "Apple Silicon" in accel_mode:
+        if "Apple Silicon" in accel_mode:
             encoding_flags = ['-c:v', 'h264_videotoolbox', '-b:v', bitrate_val, '-allow_sw', '1']
-        elif "Intel QSV" in accel_mode:
-            encoding_flags = ['-c:v', 'h264_qsv', '-preset', 'fast', '-b:v', bitrate_val]
-        elif "AMD AMF" in accel_mode:
-            encoding_flags = ['-c:v', 'h264_amf', '-quality', 'speed', '-b:v', bitrate_val]
+        elif "NVIDIA" in accel_mode:
+            encoding_flags = ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '24', '-b:v', bitrate_val]
         else:
             encoding_flags = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23']
 
         fc = fc.strip(';')
 
         cmd = [ffmpeg_path, '-y'] + inputs + ['-filter_complex', fc, '-map', last_vid, '-map', '[afin]']
-        cmd += ['-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100']
+        cmd += ['-c:a', 'aac', '-b:a', '96k', '-ac', '2', '-ar', '44100']
         cmd += metadata_flags
         cmd += ['-shortest'] + encoding_flags + ['-pix_fmt', 'yuv420p', p_out]
 
         if log_fn:
             log_fn(f"[FFMPEG] {p_out}")
 
-        subprocess.run(cmd, check=True, stderr=subprocess.PIPE, **_SUBPROCESS_FLAGS)
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == "win32" else 0
+        subprocess.run(cmd, check=True, stderr=subprocess.PIPE, creationflags=flags)
 
         ts = fake_time.timestamp()
         if os.path.exists(p_out):
@@ -594,30 +662,20 @@ def process_single_video(data, log_fn=None):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NOCAPTION V4 — GMV Generator")
+        self.title("NOCAPTION - GMV V9 (V4)")
         self.geometry("1100x800")
         self.minsize(1000, 700)
-
-        # Set app icon if available
-        self._set_app_icon()
 
         self.saved_config = load_config()
         self.log_queue = queue.Queue()
         self.ui_queue = queue.Queue()
+        self.unique_estimate_after_id = None
 
         self._build_ui()
         self._start_log_pump()
         self._apply_saved_config()
-
-    def _set_app_icon(self):
-        """Set the window icon (works on Windows with .ico files)."""
-        try:
-            base_dir = _get_app_base_dir()
-            ico_path = os.path.join(base_dir, 'icon.ico')
-            if os.path.exists(ico_path):
-                self.iconbitmap(ico_path)
-        except Exception:
-            pass
+        self._bind_unique_estimate_traces()
+        self._schedule_unique_estimate_refresh()
 
     def _build_ui(self):
         nb = ttk.Notebook(self)
@@ -673,6 +731,35 @@ class App(tk.Tk):
         self.path_cta = tk.StringVar()
         self._path_row(self.struct_frame, "Hook Folder", self.path_hook, is_dir=True)
         self._path_row(self.struct_frame, "Problem Folder", self.path_prob, is_dir=True)
+        self.random_problem_count = tk.BooleanVar(value=False)
+        self.problem_count_row = ttk.Frame(self.struct_frame)
+        self.problem_count_row.pack(fill=tk.X, padx=10, pady=4)
+        ttk.Checkbutton(
+            self.problem_count_row,
+            text="Random Problem Count",
+            variable=self.random_problem_count,
+            command=self._toggle_problem_count
+        ).pack(side=tk.LEFT)
+        ttk.Label(self.problem_count_row, text="Min", width=5).pack(side=tk.LEFT, padx=(12, 4))
+        self.min_problem_clip = tk.IntVar(value=1)
+        self.min_problem_spin = ttk.Spinbox(
+            self.problem_count_row,
+            from_=1,
+            to=6,
+            textvariable=self.min_problem_clip,
+            width=4
+        )
+        self.min_problem_spin.pack(side=tk.LEFT)
+        ttk.Label(self.problem_count_row, text="Max", width=5).pack(side=tk.LEFT, padx=(12, 4))
+        self.max_problem_clip = tk.IntVar(value=6)
+        self.max_problem_spin = ttk.Spinbox(
+            self.problem_count_row,
+            from_=1,
+            to=6,
+            textvariable=self.max_problem_clip,
+            width=4
+        )
+        self.max_problem_spin.pack(side=tk.LEFT)
         self._path_row(self.struct_frame, "Solution Folder", self.path_sol, is_dir=True)
         self._path_row(self.struct_frame, "CTA Folder", self.path_cta, is_dir=True)
         self.use_struct_outro = tk.BooleanVar(value=False)
@@ -694,6 +781,11 @@ class App(tk.Tk):
             command=lambda: self._pick_dir(self.path_struct_outro)
         )
         self.struct_outro_btn.pack(side=tk.LEFT)
+        self.unique_estimate_text = tk.StringVar(value="Max unique: -")
+        ttk.Label(
+            self.struct_frame,
+            textvariable=self.unique_estimate_text
+        ).pack(fill=tk.X, padx=10, pady=4)
 
         # VO / Music / Output
         self.enable_vo = tk.BooleanVar(value=True)
@@ -729,6 +821,7 @@ class App(tk.Tk):
         self._toggle_music()
         self._toggle_duration()
         self._toggle_struct_outro()
+        self._toggle_problem_count()
 
     def _build_control_tab(self):
         frm = self.tab_control
@@ -739,23 +832,24 @@ class App(tk.Tk):
         self.hw_choice = tk.StringVar()
         hw_options = [
             "CPU (Standard - libx264) - Lambat tapi Stabil",
-            "NVIDIA GPU (Windows - nvenc) - Cepat",
-            "Intel QSV (Intel GPU) - Cepat",
-            "AMD AMF (AMD GPU) - Cepat",
             "Apple Silicon (Mac M1/M2/M3 - videotoolbox) - Super Cepat",
+            "NVIDIA GPU (Windows - nvenc) - Cepat"
         ]
-        # Smart default based on platform
-        if sys.platform == "win32":
-            default_hw = 0  # CPU as safe default on Windows
-        elif sys.platform == "darwin" and platform.machine() == "arm64":
-            default_hw = 4  # Apple Silicon
-        else:
-            default_hw = 0  # CPU
+        default_hw = 0
+        if sys.platform == "darwin" and platform.machine() == "arm64":
+            default_hw = 1
         self.hw_choice.set(hw_options[default_hw])
         ttk.Combobox(hw_frame, textvariable=self.hw_choice, values=hw_options, state="readonly", width=60).pack(side=tk.LEFT, padx=6)
         self.bitrate_mode = tk.StringVar(value="5M (Standard)")
+        bitrate_options = [
+            "1.5M (Very Light)",
+            "2M (Ultra Light)",
+            "3M (Light)",
+            "5M (Standard)",
+            "8M (High)",
+        ]
         ttk.Combobox(hw_frame, textvariable=self.bitrate_mode,
-                     values=["3M (Light)", "5M (Standard)", "8M (High)"], state="readonly", width=15).pack(side=tk.LEFT, padx=6)
+                     values=bitrate_options, state="readonly", width=18).pack(side=tk.LEFT, padx=6)
 
         # Threading
         perf_frame = ttk.LabelFrame(frm, text="Performance & Threading")
@@ -895,19 +989,6 @@ class App(tk.Tk):
         self.status_label = ttk.Label(frm, text="Idle")
         self.status_label.pack(fill=tk.X, padx=10)
 
-        # FFmpeg status
-        ffmpeg_status_frame = ttk.LabelFrame(frm, text="FFmpeg Status")
-        ffmpeg_status_frame.pack(fill=tk.X, padx=10, pady=6)
-        ffmpeg_path = find_ffmpeg()
-        if ffmpeg_path:
-            status_text = f"✅ FFmpeg ditemukan: {ffmpeg_path}"
-            status_color = "green"
-        else:
-            status_text = "❌ FFmpeg TIDAK ditemukan! Install FFmpeg dan tambahkan ke PATH."
-            status_color = "red"
-        self.ffmpeg_status = tk.Label(ffmpeg_status_frame, text=status_text, fg=status_color, anchor="w")
-        self.ffmpeg_status.pack(fill=tk.X, padx=6, pady=4)
-
         log_frame = ttk.LabelFrame(frm, text="Logs")
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
         self.log_text = tk.Text(log_frame, height=20, wrap=tk.WORD)
@@ -945,6 +1026,8 @@ class App(tk.Tk):
         self._set_widget_tree_state(self.struct_frame, "normal" if not is_random else "disabled")
         if not is_random:
             self._toggle_struct_outro()
+            self._toggle_problem_count()
+        self._schedule_unique_estimate_refresh()
 
     def _toggle_vo(self):
         state = "normal" if self.enable_vo.get() else "disabled"
@@ -969,10 +1052,19 @@ class App(tk.Tk):
             child.configure(state=state)
 
     def _toggle_struct_outro(self):
-        is_enabled = self.use_struct_outro.get()
+        is_enabled = self.use_struct_outro.get() and (self.gen_mode.get() == "Structured Story (Hook-Case-Sol-CTA)")
         state = "normal" if is_enabled else "disabled"
         self.struct_outro_entry.configure(state=state)
         self.struct_outro_btn.configure(state=state)
+        self._schedule_unique_estimate_refresh()
+
+    def _toggle_problem_count(self):
+        is_struct_mode = self.gen_mode.get() == "Structured Story (Hook-Case-Sol-CTA)"
+        is_enabled = is_struct_mode and self.random_problem_count.get()
+        state = "normal" if is_enabled else "disabled"
+        self.min_problem_spin.configure(state=state)
+        self.max_problem_spin.configure(state=state)
+        self._schedule_unique_estimate_refresh()
 
     def _find_children_with_var(self, var):
         # Helper to locate widgets linked to a Tk variable
@@ -992,6 +1084,77 @@ class App(tk.Tk):
             if "state" in child.keys():
                 child.configure(state=state)
             self._set_widget_tree_state(child, state)
+
+    def _bind_unique_estimate_traces(self):
+        watched_vars = [
+            self.gen_mode,
+            self.path_hook,
+            self.path_prob,
+            self.path_sol,
+            self.path_cta,
+            self.path_struct_outro,
+            self.random_problem_count,
+            self.min_problem_clip,
+            self.max_problem_clip,
+            self.use_struct_outro,
+            self.limit_qty,
+        ]
+        for var in watched_vars:
+            var.trace_add("write", lambda *_: self._schedule_unique_estimate_refresh())
+
+    def _schedule_unique_estimate_refresh(self):
+        if self.unique_estimate_after_id:
+            self.after_cancel(self.unique_estimate_after_id)
+        self.unique_estimate_after_id = self.after(200, self._refresh_unique_estimate)
+
+    def _refresh_unique_estimate(self):
+        self.unique_estimate_after_id = None
+        if self.gen_mode.get() != "Structured Story (Hook-Case-Sol-CTA)":
+            self.unique_estimate_text.set("Max unique: aktif hanya di Structured mode")
+            return
+
+        hooks = get_files(self.path_hook.get(), ('.mp4', '.mov'))
+        probs = get_files(self.path_prob.get(), ('.mp4', '.mov'))
+        sols = get_files(self.path_sol.get(), ('.mp4', '.mov'))
+        ctas = get_files(self.path_cta.get(), ('.mp4', '.mov'))
+
+        if not (hooks and probs and sols and ctas):
+            self.unique_estimate_text.set("Max unique: isi semua folder Hook/Problem/Solution/CTA")
+            return
+
+        random_prob = self.random_problem_count.get()
+        n_prob = len(probs)
+        if random_prob:
+            min_k = max(1, int(self.min_problem_clip.get()))
+            max_k = min(6, int(self.max_problem_clip.get()), n_prob)
+            if min_k > max_k:
+                self.unique_estimate_text.set("Max unique: 0 (range Problem tidak valid)")
+                return
+            problem_variants = sum(perm_count(n_prob, k) for k in range(min_k, max_k + 1))
+        else:
+            min_k = max_k = 1
+            problem_variants = n_prob
+
+        max_unique = len(hooks) * len(sols) * len(ctas) * problem_variants
+        outro_count = 0
+        if self.use_struct_outro.get():
+            outros = get_files(self.path_struct_outro.get(), ('.mp4', '.mov'))
+            outro_count = len(outros)
+            if outro_count == 0:
+                self.unique_estimate_text.set("Max unique: isi folder Structured Outro")
+                return
+            max_unique *= outro_count
+
+        limit = int(self.limit_qty.get())
+        if limit > max_unique:
+            msg = f"Max unique: {max_unique} (limit {limit} > max, output akan dibatasi)"
+        else:
+            msg = f"Max unique: {max_unique} (limit {limit})"
+        if random_prob:
+            msg += f" | Problem clips: {min_k}-{max_k}"
+        if self.use_struct_outro.get():
+            msg += f" | Outro choices: {outro_count}"
+        self.unique_estimate_text.set(msg)
 
     def _log(self, msg):
         self.log_queue.put(msg)
@@ -1036,6 +1199,12 @@ class App(tk.Tk):
         if (not mode_random) and self.use_struct_outro.get() and not self.path_struct_outro.get():
             messagebox.showerror("Error", "Structured outro folder required")
             return None
+        if (not mode_random) and self.random_problem_count.get():
+            min_prob = int(self.min_problem_clip.get())
+            max_prob = int(self.max_problem_clip.get())
+            if min_prob < 1 or max_prob > 6 or min_prob > max_prob:
+                messagebox.showerror("Error", "Problem count range harus 1-6 dan Min <= Max")
+                return None
         if self.enable_vo.get() and not self.path_vo.get():
             messagebox.showerror("Error", "Voice over folder required")
             return None
@@ -1090,6 +1259,9 @@ class App(tk.Tk):
             'file_outro': self.file_outro.get(),
             'mode_random': mode_random,
             'use_struct_outro': self.use_struct_outro.get(),
+            'random_problem_count': self.random_problem_count.get(),
+            'min_problem_clip': int(self.min_problem_clip.get()),
+            'max_problem_clip': int(self.max_problem_clip.get()),
             'enable_vo': self.enable_vo.get(),
             'enable_music': self.enable_music.get(),
             'keep_ori_audio': self.keep_ori_audio.get(),
@@ -1121,7 +1293,8 @@ class App(tk.Tk):
             'hw_accel': self.hw_choice.get(),
             'bitrate_mode': self.bitrate_mode.get(),
             'meta': meta_config,
-            'preview_mode': preview_mode
+            'preview_mode': preview_mode,
+            'strict_name_mode': (not mode_random),
         }
         return cfg
 
@@ -1132,14 +1305,7 @@ class App(tk.Tk):
 
         ffmpeg_path = find_ffmpeg()
         if not ffmpeg_path:
-            messagebox.showerror("Error",
-                "FFmpeg tidak ditemukan!\n\n"
-                "Cara install:\n"
-                "1. Download dari https://www.gyan.dev/ffmpeg/builds/\n"
-                "2. Extract ke C:\\ffmpeg\\\n"
-                "3. Tambahkan C:\\ffmpeg\\bin ke System PATH\n"
-                "4. Restart aplikasi ini"
-            )
+            messagebox.showerror("Error", "FFmpeg not found. Install via Homebrew: brew install ffmpeg")
             return
 
         if cfg['enable_vo']:
@@ -1159,19 +1325,38 @@ class App(tk.Tk):
             fixed_combo = None
         else:
             try:
-                h = random.choice(get_files(cfg['path_hook'], ('.mp4', '.mov')))
-                p = random.choice(get_files(cfg['path_prob'], ('.mp4', '.mov')))
-                s = random.choice(get_files(cfg['path_sol'], ('.mp4', '.mov')))
-                c = random.choice(get_files(cfg['path_cta'], ('.mp4', '.mov')))
+                fh = get_files(cfg['path_hook'], ('.mp4', '.mov'))
+                fp = get_files(cfg['path_prob'], ('.mp4', '.mov'))
+                fs = get_files(cfg['path_sol'], ('.mp4', '.mov'))
+                fc = get_files(cfg['path_cta'], ('.mp4', '.mov'))
+                if not (fh and fp and fs and fc):
+                    messagebox.showerror("Error", "Folder structure empty")
+                    return
+
+                h = random.choice(fh)
+                s = random.choice(fs)
+                c = random.choice(fc)
+
+                if cfg.get('random_problem_count'):
+                    min_k = max(1, int(cfg.get('min_problem_clip', 1)))
+                    max_k = min(6, int(cfg.get('max_problem_clip', 6)), len(fp))
+                    if min_k > max_k:
+                        messagebox.showerror("Error", "Jumlah problem clips tidak valid")
+                        return
+                    k = random.randint(min_k, max_k)
+                    probs = tuple(random.sample(fp, k))
+                else:
+                    probs = (random.choice(fp),)
+
                 if cfg.get('use_struct_outro'):
                     fo = get_files(cfg['path_struct_outro'], ('.mp4', '.mov'))
                     if not fo:
                         messagebox.showerror("Error", "Structured outro folder empty")
                         return
                     o = random.choice(fo)
-                    fixed_combo = (h, p, s, c, o)
+                    fixed_combo = (h, probs, s, c, o)
                 else:
-                    fixed_combo = (h, p, s, c)
+                    fixed_combo = (h, probs, s, c)
             except Exception:
                 messagebox.showerror("Error", "Folder structure empty")
                 return
@@ -1183,7 +1368,7 @@ class App(tk.Tk):
         self.progress['value'] = 0
 
         def worker():
-            data_pack = (0, sample_vo, 1, cfg, {}, list_vid, list_mus, ffmpeg_path, fixed_combo)
+            data_pack = (0, sample_vo, 1, cfg, {}, list_vid, list_mus, ffmpeg_path, fixed_combo, None)
             ok = process_single_video(data_pack, log_fn=self._log)
             self.log_queue.put("✅ Preview Ready" if ok else "❌ Preview Failed")
             self._ui(lambda: self._set_status("Idle"))
@@ -1206,20 +1391,17 @@ class App(tk.Tk):
             'path_sol': cfg['path_sol'],
             'path_cta': cfg['path_cta'],
             'path_struct_outro': cfg['path_struct_outro'],
+            'use_struct_outro': cfg['use_struct_outro'],
+            'random_problem_count': cfg['random_problem_count'],
+            'min_problem_clip': cfg['min_problem_clip'],
+            'max_problem_clip': cfg['max_problem_clip'],
             'file_intro': cfg['file_intro'],
             'file_outro': cfg['file_outro']
         })
 
         ffmpeg_path = find_ffmpeg()
         if not ffmpeg_path:
-            messagebox.showerror("Error",
-                "FFmpeg tidak ditemukan!\n\n"
-                "Cara install:\n"
-                "1. Download dari https://www.gyan.dev/ffmpeg/builds/\n"
-                "2. Extract ke C:\\ffmpeg\\\n"
-                "3. Tambahkan C:\\ffmpeg\\bin ke System PATH\n"
-                "4. Restart aplikasi ini"
-            )
+            messagebox.showerror("Error", "FFmpeg not found. Install via Homebrew: brew install ffmpeg")
             return
 
         list_vo = get_files(cfg['path_vo'], ('.mp3', '.wav')) if cfg['enable_vo'] else []
@@ -1267,6 +1449,7 @@ class App(tk.Tk):
 
             if len(blueprints) < unique_target:
                 self._log("⚠️ Kesulitan mencapai semua kombinasi unik. Output dibatasi.")
+            output_stems = [None] * len(blueprints)
         else:
             fh = get_files(cfg['path_hook'], ('.mp4', '.mov'))
             fp = get_files(cfg['path_prob'], ('.mp4', '.mov'))
@@ -1275,17 +1458,45 @@ class App(tk.Tk):
             if not (fh and fp and fs and fc):
                 messagebox.showerror("Error", "Structured folders incomplete")
                 return
+            min_prob = max(1, int(cfg.get('min_problem_clip', 1)))
+            max_prob = min(6, int(cfg.get('max_problem_clip', 6)), len(fp))
+            if cfg.get('random_problem_count') and min_prob > max_prob:
+                messagebox.showerror("Error", "Problem folder tidak cukup untuk range yang dipilih")
+                return
             if cfg.get('use_struct_outro'):
                 fo = get_files(cfg['path_struct_outro'], ('.mp4', '.mov'))
                 if not fo:
                     messagebox.showerror("Error", "Structured outro folder empty")
                     return
-                blueprints, max_possibilities = generate_structured_blueprints(fh, fp, fs, fc, fo, limit)
+                outros = fo
             else:
-                blueprints, max_possibilities = generate_smart_blueprints(fh, fp, fs, fc, limit)
-            self._log(f"📊 Found {len(blueprints)} UNIQUE combinations.")
+                outros = None
+
+            existing_signatures = set()
+            if os.path.isdir(cfg['path_out']):
+                for name in os.listdir(cfg['path_out']):
+                    if name.lower().endswith('.mp4'):
+                        existing_signatures.add(os.path.splitext(name)[0].lower())
+
+            blueprints, max_possibilities, output_stems = generate_structured_blueprints(
+                fh,
+                fp,
+                fs,
+                fc,
+                outros,
+                limit,
+                random_problem_count=cfg.get('random_problem_count', False),
+                min_problem=min_prob,
+                max_problem=max_prob,
+                excluded_signatures=existing_signatures,
+            )
+            self._log(
+                f"📊 Found {len(blueprints)} UNIQUE combinations (strict), existing signatures: {len(existing_signatures)}."
+            )
             if limit > max_possibilities:
-                self._log("⚠️ Unik kombinasi sudah habis. Output dibatasi ke jumlah unik.")
+                self._log("⚠️ Unik kombinasi teoritis habis. Output dibatasi ke jumlah unik.")
+            elif len(blueprints) < limit:
+                self._log("⚠️ Strict mode: sebagian kombinasi sudah ada di output folder, jadi batch dibatasi.")
 
         final_limit = len(blueprints)
         if final_limit == 0:
@@ -1303,7 +1514,20 @@ class App(tk.Tk):
 
         jobs_data = []
         for i in range(final_limit):
-            jobs_data.append((i, loop_vo[i], final_limit, cfg, {}, list_vid, list_mus, ffmpeg_path, blueprints[i]))
+            jobs_data.append(
+                (
+                    i,
+                    loop_vo[i],
+                    final_limit,
+                    cfg,
+                    {},
+                    list_vid,
+                    list_mus,
+                    ffmpeg_path,
+                    blueprints[i],
+                    output_stems[i] if i < len(output_stems) else None,
+                )
+            )
 
         self.status_label.config(text=f"Rendering {final_limit} videos...")
         self.progress['value'] = 0
@@ -1335,8 +1559,14 @@ class App(tk.Tk):
         self.path_sol.set(cfg.get('path_sol', ''))
         self.path_cta.set(cfg.get('path_cta', ''))
         self.path_struct_outro.set(cfg.get('path_struct_outro', ''))
+        self.use_struct_outro.set(cfg.get('use_struct_outro', False))
+        self.random_problem_count.set(cfg.get('random_problem_count', False))
+        self.min_problem_clip.set(cfg.get('min_problem_clip', 1))
+        self.max_problem_clip.set(cfg.get('max_problem_clip', 6))
         self.file_intro.set(cfg.get('file_intro', ''))
         self.file_outro.set(cfg.get('file_outro', ''))
+        self._toggle_struct_outro()
+        self._toggle_problem_count()
 
 
 if __name__ == "__main__":
