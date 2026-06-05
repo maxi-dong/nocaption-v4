@@ -553,7 +553,15 @@ def process_single_video(data, log_fn=None):
                 wm_rot_deg = round(random.uniform(-2, 2), 2)
                 wm_rot_rad = wm_rot_deg * math.pi / 180
                 
-                fc += f"[{idx_wm}:v]format=rgba,colorchannelmixer=aa={opac},scale=iw*{wm_scale_factor}:-1,rotate={wm_rot_rad}:c=none:ow=rotw({wm_rot_rad}):oh=roth({wm_rot_rad})[wm];"
+                anim = b_cfg.get('anim', 'Static')
+                if anim == "Random Mix":
+                    anim = random.choice(["Static", "Hover", "Slide In", "Pulsing", "Hopping"])
+                
+                scale_expr = f"iw*{wm_scale_factor}"
+                if anim == "Pulsing":
+                    scale_expr = f"iw*{wm_scale_factor}*(1+0.05*sin(t*3))"
+                
+                fc += f"[{idx_wm}:v]format=rgba,colorchannelmixer=aa={opac},scale=w='{scale_expr}':h=-1:eval=frame,rotate={wm_rot_rad}:c=none:ow=rotw({wm_rot_rad}):oh=roth({wm_rot_rad})[wm];"
                 
                 pos = b_cfg['pos']
                 if pos == "Random":
@@ -575,13 +583,30 @@ def process_single_video(data, log_fn=None):
                 else:
                     ox, oy = f"{pad_x}", f"{pad_y}"
                     
+                fx, fy = ox, oy
+                if anim == "Hover":
+                    fx = f"({ox})+15*sin(t*1.5)"
+                    fy = f"({oy})+15*cos(t*1.3)"
+                elif anim == "Hopping":
+                    fx = f"({ox})"
+                    fy = f"({oy})-20*abs(sin(t*4))"
+                elif anim == "Slide In":
+                    if "Left" in pos:
+                        fx = f"-w+(({ox})+w)*min(t,1)"
+                    elif "Right" in pos:
+                        fx = f"W-(W-({ox}))*min(t,1)"
+                    elif pos == "Center":
+                        fy = f"H-(H-({oy}))*min(t,1)"
+                    else:
+                        fx = f"-w+(({ox})+w)*min(t,1)"
+                    
                 enable_cmd = ""
                 if b_cfg['dur'] == "Random Pop-up":
                     cycle = random.randint(7, 12)
                     show = round(random.uniform(2.5, 4.5), 2)
                     enable_cmd = f":enable='lt(mod(t\\,{cycle})\\,{show})'"
                 
-                fc += f"{last_vid}[wm]overlay=x='{ox}':y='{oy}'{enable_cmd}[v_wm];"
+                fc += f"{last_vid}[wm]overlay=x='{fx}':y='{fy}'{enable_cmd}[v_wm];"
                 last_vid = "[v_wm]"
 
         vo_added_at_index = None
@@ -1169,6 +1194,11 @@ class App(tk.Tk):
         ttk.Scale(set_frame, from_=10, to=300, variable=self.wm_size, orient=tk.HORIZONTAL, length=150).grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
         ttk.Label(set_frame, textvariable=self.wm_size).grid(row=3, column=2, sticky=tk.W)
 
+        # Animation Mode
+        ttk.Label(set_frame, text="Animation:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.wm_anim = tk.StringVar(value="Static")
+        ttk.Combobox(set_frame, textvariable=self.wm_anim, values=["Static", "Hover", "Slide In", "Pulsing", "Hopping", "Random Mix"], state="readonly", width=15).grid(row=4, column=1, padx=10, pady=5, sticky=tk.W)
+
     def _build_actions_tab(self):
         frm = self.tab_actions
 
@@ -1505,7 +1535,8 @@ class App(tk.Tk):
                 'pos': self.wm_pos.get(),
                 'opacity': int(self.wm_opacity.get()),
                 'dur': self.wm_dur.get(),
-                'scale': int(self.wm_size.get())
+                'scale': int(self.wm_size.get()),
+                'anim': self.wm_anim.get()
             }
         }
         return cfg
@@ -1623,7 +1654,8 @@ class App(tk.Tk):
             'wm_pos': cfg['branding']['pos'],
             'wm_opacity': cfg['branding']['opacity'],
             'wm_dur': cfg['branding']['dur'],
-            'wm_size': cfg['branding']['scale']
+            'wm_size': cfg['branding']['scale'],
+            'wm_anim': cfg['branding']['anim']
         })
 
         ffmpeg_path = find_ffmpeg()
@@ -1807,6 +1839,7 @@ class App(tk.Tk):
         self.wm_opacity.set(cfg.get('wm_opacity', 80))
         self.wm_dur.set(cfg.get('wm_dur', 'Full Video'))
         self.wm_size.set(cfg.get('wm_size', 100))
+        self.wm_anim.set(cfg.get('wm_anim', 'Static'))
         self._toggle_struct_outro()
         self._toggle_problem_count()
 
