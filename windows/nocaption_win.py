@@ -551,11 +551,12 @@ def process_single_video(data, log_fn=None):
                 ctr += 1
                 
                 opac = b_cfg['opacity'] / 100.0
-                wm_scale_factor = round(random.uniform(0.98, 1.02), 3)
+                base_scale = b_cfg.get('scale', 100) / 100.0
+                wm_scale_factor = round(random.uniform(0.98, 1.02) * base_scale, 3)
                 wm_rot_deg = round(random.uniform(-2, 2), 2)
                 wm_rot_rad = wm_rot_deg * math.pi / 180
                 
-                fc += f"[{idx_wm}:v]format=rgba,colorchannelmixer=aa={opac},scale=iw*{wm_scale_factor}:-1,rotate={wm_rot_rad}:c=none:ow=rotw(a):oh=roth(a)[wm];"
+                fc += f"[{idx_wm}:v]format=rgba,colorchannelmixer=aa={opac},scale=iw*{wm_scale_factor}:-1,rotate={wm_rot_rad}:c=none:ow=rotw({wm_rot_rad}):oh=roth({wm_rot_rad})[wm];"
                 
                 pos = b_cfg['pos']
                 if pos == "Random":
@@ -1166,6 +1167,12 @@ class App(tk.Tk):
         self.wm_dur = tk.StringVar(value="Full Video")
         ttk.Combobox(set_frame, textvariable=self.wm_dur, values=["Full Video", "Random Pop-up"], state="readonly", width=15).grid(row=2, column=1, padx=10, pady=5, sticky=tk.W)
 
+        # Scale / Size
+        ttk.Label(set_frame, text="Size (%):").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.wm_size = tk.IntVar(value=100)
+        ttk.Scale(set_frame, from_=10, to=300, variable=self.wm_size, orient=tk.HORIZONTAL, length=150).grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(set_frame, textvariable=self.wm_size).grid(row=3, column=2, sticky=tk.W)
+
     def _build_actions_tab(self):
         frm = self.tab_actions
 
@@ -1501,7 +1508,8 @@ class App(tk.Tk):
                 'path': self.wm_path.get(),
                 'pos': self.wm_pos.get(),
                 'opacity': int(self.wm_opacity.get()),
-                'dur': self.wm_dur.get()
+                'dur': self.wm_dur.get(),
+                'scale': int(self.wm_size.get())
             }
         }
         return cfg
@@ -1618,7 +1626,8 @@ class App(tk.Tk):
             'wm_path': cfg['branding']['path'],
             'wm_pos': cfg['branding']['pos'],
             'wm_opacity': cfg['branding']['opacity'],
-            'wm_dur': cfg['branding']['dur']
+            'wm_dur': cfg['branding']['dur'],
+            'wm_size': cfg['branding']['scale']
         })
 
         ffmpeg_path = find_ffmpeg()
@@ -1801,6 +1810,7 @@ class App(tk.Tk):
         self.wm_pos.set(cfg.get('wm_pos', 'Top-Left'))
         self.wm_opacity.set(cfg.get('wm_opacity', 80))
         self.wm_dur.set(cfg.get('wm_dur', 'Full Video'))
+        self.wm_size.set(cfg.get('wm_size', 100))
         self._toggle_struct_outro()
         self._toggle_problem_count()
 
